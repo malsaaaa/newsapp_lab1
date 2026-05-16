@@ -49,6 +49,7 @@ dependencies:
   
   # Environment configuration (.env support)
   flutter_dotenv: ^5.1.0
+  socket_io_client: ^3.1.4
 
 dev_dependencies:
   flutter_test:

@@ -7,10 +7,19 @@ import 'news_api_service.dart';
 import 'article_detail_page.dart';
 import 'theme.dart';
 import 'config.dart';
+import 'services/auth_service.dart';
+import 'services/notification_service.dart';
+import 'screens/login_screen.dart';
+import 'screens/signup_screen.dart';
+import 'screens/bookmarks_screen.dart';
+import 'widgets/notification_overlay.dart';
 
 void main() async {
   // Initialize environment configuration
   await AppConfig.initialize();
+  
+  // Initialize notifications
+  await NotificationService.initialize();
   
   // Log configuration for debugging
   if (AppConfig.enableDetailedLogs) {
@@ -29,6 +38,13 @@ class NewsApp extends StatefulWidget {
 
 class _NewsAppState extends State<NewsApp> {
   bool isDarkMode = false;
+  late Future<bool> _isLoggedInFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _isLoggedInFuture = AuthService.isLoggedIn();
+  }
 
   void _toggleTheme() {
     setState(() {
@@ -36,25 +52,93 @@ class _NewsAppState extends State<NewsApp> {
     });
   }
 
+  void _refreshAuth() {
+    setState(() {
+      _isLoggedInFuture = AuthService.isLoggedIn();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'News App Lab',
-      theme: AppTheme.lightTheme,
-      darkTheme: AppTheme.darkTheme,
-      themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
-      home: NewsHomePage(onThemeToggle: _toggleTheme, isDarkMode: isDarkMode),
+    return NotificationOverlay(
+      child: MaterialApp(
+        title: 'News App Lab',
+        theme: AppTheme.lightTheme,
+        darkTheme: AppTheme.darkTheme,
+        themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
+        home: FutureBuilder<bool>(
+          future: _isLoggedInFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Scaffold(
+                body: Center(child: CircularProgressIndicator()),
+              );
+            }
+
+            final isLoggedIn = snapshot.data ?? false;
+
+            if (!isLoggedIn) {
+              return AuthNavigation(
+                onLoginSuccess: _refreshAuth,
+              );
+            }
+
+            return NewsHomePage(
+              onThemeToggle: _toggleTheme,
+              isDarkMode: isDarkMode,
+              onLogout: _refreshAuth,
+            );
+          },
+        ),
+      ),
     );
   }
 }
 
+// Auth Navigation
+class AuthNavigation extends StatefulWidget {
+  final VoidCallback onLoginSuccess;
+
+  const AuthNavigation({
+    Key? key,
+    required this.onLoginSuccess,
+  }) : super(key: key);
+
+  @override
+  State<AuthNavigation> createState() => _AuthNavigationState();
+}
+
+class _AuthNavigationState extends State<AuthNavigation> {
+  bool _showLogin = true;
+
+  @override
+  Widget build(BuildContext context) {
+    return _showLogin
+        ? LoginScreen(
+            onLoginSuccess: widget.onLoginSuccess,
+            onNavigateToSignup: () {
+              setState(() => _showLogin = false);
+            },
+          )
+        : SignupScreen(
+            onSignupSuccess: widget.onLoginSuccess,
+            onNavigateToLogin: () {
+              setState(() => _showLogin = true);
+            },
+          );
+  }
+}
+
+
 class NewsHomePage extends StatefulWidget {
   final VoidCallback onThemeToggle;
   final bool isDarkMode;
+  final VoidCallback? onLogout;
 
   const NewsHomePage({
     required this.onThemeToggle,
     required this.isDarkMode,
+    this.onLogout,
   });
 
   @override
@@ -216,6 +300,21 @@ class _NewsHomePageState extends State<NewsHomePage> {
             tooltip: widget.isDarkMode ? 'Light mode' : 'Dark mode',
             onPressed: widget.onThemeToggle,
           ),
+          // Bookmarks button
+          IconButton(
+            icon: const Icon(Icons.bookmark),
+            tooltip: 'My Bookmarks',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => BookmarksScreen(
+                    onLogout: widget.onLogout ?? () {},
+                  ),
+                ),
+              );
+            },
+          ),
           // Refresh button
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -228,6 +327,39 @@ class _NewsHomePageState extends State<NewsHomePage> {
               });
               _loadHeadlines();
             },
+          ),
+          // Logout button
+          PopupMenuButton(
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                child: const Text('Logout'),
+                onTap: () {
+                  showDialog(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Logout'),
+                      content: const Text('Are you sure you want to logout?'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Cancel'),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            Navigator.pop(context);
+                            AuthService.logout();
+                            if (widget.onLogout != null) {
+                              widget.onLogout!();
+                            }
+                          },
+                          child: const Text('Logout', style: TextStyle(color: Colors.red)),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ],
           ),
         ],
       ),
@@ -328,10 +460,43 @@ class _NewsHomePageState extends State<NewsHomePage> {
   }
 }
 
-class NewsArticleTile extends StatelessWidget {
+class NewsArticleTile extends StatefulWidget {
   final Article article;
 
   const NewsArticleTile({Key? key, required this.article}) : super(key: key);
+
+  @override
+  State<NewsArticleTile> createState() => _NewsArticleTileState();
+}
+
+class _NewsArticleTileState extends State<NewsArticleTile> {
+  bool _isBookmarking = false;
+
+  void _handleBookmark() async {
+    setState(() => _isBookmarking = true);
+
+    final result = await AuthService.addBookmark(
+      articleUrl: widget.article.url,
+      title: widget.article.title,
+      description: widget.article.description,
+      urlToImage: widget.article.imageUrl,
+      source: 'News Source',
+    );
+
+    if (!mounted) return;
+
+    if (result['success']) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Article bookmarked! 📚')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: ${result['message']}')),
+      );
+    }
+
+    setState(() => _isBookmarking = false);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -339,17 +504,28 @@ class NewsArticleTile extends StatelessWidget {
       margin: const EdgeInsets.all(8.0),
       child: ListTile(
         leading: _buildArticleImage(),
-        title: Text(article.title),
+        title: Text(widget.article.title),
         subtitle: Text(
-          article.truncatedDescription,
+          widget.article.truncatedDescription,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
+        ),
+        trailing: IconButton(
+          icon: _isBookmarking
+              ? const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.bookmark_border),
+          onPressed: _isBookmarking ? null : _handleBookmark,
+          tooltip: 'Bookmark article',
         ),
         onTap: () {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => ArticleDetailPage(article: article),
+              builder: (context) => ArticleDetailPage(article: widget.article),
             ),
           );
         },
@@ -360,7 +536,7 @@ class NewsArticleTile extends StatelessWidget {
   /// Build article thumbnail with improved error handling
   Widget _buildArticleImage() {
     return CachedNetworkImage(
-      imageUrl: article.imageUrl,
+      imageUrl: widget.article.imageUrl,
       width: 100,
       height: 80,
       fit: BoxFit.cover,
